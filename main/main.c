@@ -32,8 +32,12 @@
 
 static const int RX_BUF_SIZE = 1024;
 
-#define TXD_PIN (GPIO_NUM_4)
-#define RXD_PIN (GPIO_NUM_5)
+#define TXD_PIN (GPIO_NUM_4)  //!< Transmitted Data [out]
+#define RXD_PIN (GPIO_NUM_5)  //!< Received Data [in]
+#define DTR_PIN (GPIO_NUM_16) //!< Data Terminal Ready [out]
+#define DSR_PIN (GPIO_NUM_17) //!< Data Set Ready [in]
+#define RTS_PIN (GPIO_NUM_2)  //!< Request To Send [out]
+#define CTS_PIN (GPIO_NUM_15) //!< Clear To Send [in]
 
 static void uart_init()
 {
@@ -47,7 +51,7 @@ static void uart_init()
     uart_driver_install(UART_NUM_1, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
 }
 
-uint32_t _handle = 0;
+static uint32_t _spp_handle = 0;
 
 static void rx_task()
 {
@@ -61,7 +65,7 @@ static void rx_task()
             data[rxBytes] = 0;
             ESP_LOGI(RX_TASK_TAG, "Read %d bytes: '%s'", rxBytes, data);
             ESP_LOG_BUFFER_HEXDUMP(RX_TASK_TAG, data, rxBytes, ESP_LOG_INFO);
-            if (_handle) esp_spp_write(_handle, rxBytes, data);
+            if (_spp_handle) esp_spp_write(_spp_handle, rxBytes, data);
         }
     }
     free(data);
@@ -83,28 +87,44 @@ static const esp_spp_sec_t sec_mask = ESP_SPP_SEC_AUTHENTICATE;
 static const esp_spp_role_t role_slave = ESP_SPP_ROLE_SLAVE;
 
 static uint16_t _port_handle = 0;
+/// from $IDF_PATH/components/bt/bluedroid/stack/include/stack
+#define PORT_DTRDSR_ON          0x01
+#define PORT_CTSRTS_ON          0x02
 extern int PORT_GetModemStatus(uint16_t handle, uint8_t *p_signal);
+#define PORT_SET_DTRDSR         0x01
+#define PORT_CLR_DTRDSR         0x02
+#define PORT_SET_CTSRTS         0x03
+#define PORT_CLR_CTSRTS         0x04
+extern int PORT_Control (uint16_t handle, uint8_t signal);
 
-#define UART_RTS_GPIO (2)
 static void port_task()
 {
     static const char *PORT_TASK_TAG = "PORT_TASK";
     while (1) {
-        gpio_pad_select_gpio(UART_RTS_GPIO);
-        gpio_set_direction(UART_RTS_GPIO, GPIO_MODE_OUTPUT);
+        // initialize GPIO pins for control signals
+        gpio_pad_select_gpio(RTS_PIN);
+        gpio_set_direction(RTS_PIN, GPIO_MODE_OUTPUT);
+        gpio_pad_select_gpio(DTR_PIN);
+        gpio_set_direction(DTR_PIN, GPIO_MODE_OUTPUT);
+        gpio_pad_select_gpio(CTS_PIN);
+        gpio_set_direction(CTS_PIN, GPIO_MODE_INPUT);
+        gpio_pad_select_gpio(DSR_PIN);
+        gpio_set_direction(DSR_PIN, GPIO_MODE_INPUT);
         if (_port_handle) {
-            static uint8_t sig_prev = 0x80;
+            static uint8_t sig_prev_in = 0x80;
             uint8_t sig;
             if (!PORT_GetModemStatus(_port_handle, &sig)) {
-                //MODEM_SIGNAL_DTRDSR=1
-                //MODEM_SIGNAL_RTSCTS=2
-                if (sig_prev != sig) {
-                    ESP_LOGI(PORT_TASK_TAG, "DTR=%d, RTS=%d", !!(sig & 1),
-                            !!(sig & 2));
-                    sig_prev = sig;
+                if (sig_prev_in != sig) {
+                    ESP_LOGI(PORT_TASK_TAG, "DTR=%d, RTS=%d",
+                            !!(sig & PORT_DTRDSR_ON), !!(sig & PORT_CTSRTS_ON));
+                    sig_prev_in = sig;
                 }
-                gpio_set_level(UART_RTS_GPIO, !(sig & 2)); //RTS --> output L
+                gpio_set_level(DTR_PIN, !(sig & PORT_DTRDSR_ON)); //DTR --> output L
+                gpio_set_level(RTS_PIN, !(sig & PORT_CTSRTS_ON)); //RTS --> output L
             }
+
+            PORT_Control(_port_handle, gpio_get_level(CTS_PIN)? PORT_CLR_CTSRTS: PORT_SET_CTSRTS); // ineffective ?
+            PORT_Control(_port_handle, gpio_get_level(DSR_PIN)? PORT_CLR_DTRDSR: PORT_SET_DTRDSR);
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
@@ -141,7 +161,7 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
             esp_log_buffer_hex("",param->data_ind.data,param->data_ind.len);
             uart_write_bytes(UART_NUM_1, (char *) param->data_ind.data,
                     (size_t) param->data_ind.len);
-            _handle = param->data_ind.handle;
+            _spp_handle = param->data_ind.handle;
             break;
         case ESP_SPP_CONG_EVT:
             ESP_LOGI(SPP_TAG, "ESP_SPP_CONG_EVT cong=%d", param->cong.cong);
@@ -153,7 +173,7 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
         case ESP_SPP_SRV_OPEN_EVT:
             ESP_LOGI(SPP_TAG, "ESP_SPP_SRV_OPEN_EVT");
             _port_handle = 0;
-            for (uint16_t h = 1; h < 30; h++) {
+            for (uint16_t h = 1; h < 30; h++) { // MAX_RFC_PORTS <= 30
                 uint8_t sig;
                 int res = PORT_GetModemStatus(h, &sig);
                 if (res == 0) { //PORT_SUCCESS
@@ -163,9 +183,6 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
                 } else {
                     ESP_LOGI(SPP_TAG, "Not opened port:%d res:%d", h, res);
                 }
-//        	if (res == 9) break; //PORT_BAD_HANDLE
-//        	if (res == 10) continue; //PORT_NOT_OPENED
-//        	if (res == 11) continue; //PORT_LINE_ERR
             }
             break;
         default:
