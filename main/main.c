@@ -47,23 +47,6 @@ static void uart_init()
     uart_driver_install(UART_NUM_1, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
 }
 
-static int uart_sendData(const char* logName, const char* data)
-{
-    const int len = strlen(data);
-    const int txBytes = uart_write_bytes(UART_NUM_1, data, len);
-    ESP_LOGI(logName, "Wrote %d bytes", txBytes);
-    return txBytes;
-}
-
-static void tx_task()
-{
-    static const char *TX_TASK_TAG = "TX_TASK";
-    esp_log_level_set(TX_TASK_TAG, ESP_LOG_INFO);
-    while (1) {
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
-    }
-}
-
 uint32_t _handle = 0;
 
 static void rx_task()
@@ -87,38 +70,17 @@ static void rx_task()
 static void myuart_setup()
 {
     uart_init();
-    xTaskCreate(rx_task, "uart_rx_task", 1024 * 2, NULL, configMAX_PRIORITIES,
-    NULL);
-//    xTaskCreate(tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
+    xTaskCreate(rx_task, "uart_rx_task", 1024 * 2, NULL, configMAX_PRIORITIES, NULL);
 }
 
-#define SPP_TAG "SPP_ACCEPTOR_DEMO"
+#define SPP_TAG "SPP_RS232C"
 #define SPP_SERVER_NAME "SPP_SERVER"
-#define EXCAMPLE_DEVICE_NAME "ESP_SPP_ACCEPTOR"
-#define SPP_SHOW_DATA 0
-#define SPP_SHOW_SPEED 1
-#define SPP_SHOW_MODE SPP_SHOW_DATA    /*Choose show mode: show data or speed*/
+#define EXCAMPLE_DEVICE_NAME "ESP_SPP_RS232C"
 
 static const esp_spp_mode_t esp_spp_mode = ESP_SPP_MODE_CB;
 
-static struct timeval time_new, time_old;
-static long data_num = 0;
-
 static const esp_spp_sec_t sec_mask = ESP_SPP_SEC_AUTHENTICATE;
 static const esp_spp_role_t role_slave = ESP_SPP_ROLE_SLAVE;
-
-static void print_speed(void)
-{
-    float time_old_s = time_old.tv_sec + time_old.tv_usec / 1000000.0;
-    float time_new_s = time_new.tv_sec + time_new.tv_usec / 1000000.0;
-    float time_interval = time_new_s - time_old_s;
-    float speed = data_num * 8 / time_interval / 1000.0;
-    ESP_LOGI(SPP_TAG, "speed(%fs ~ %fs): %f kbit/s", time_old_s, time_new_s,
-            speed);
-    data_num = 0;
-    time_old.tv_sec = time_new.tv_sec;
-    time_old.tv_usec = time_new.tv_usec;
-}
 
 static uint16_t _port_handle = 0;
 extern int PORT_GetModemStatus(uint16_t handle, uint8_t *p_signal);
@@ -174,20 +136,12 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
             ESP_LOGI(SPP_TAG, "ESP_SPP_CL_INIT_EVT");
             break;
         case ESP_SPP_DATA_IND_EVT:
-#if (SPP_SHOW_MODE == SPP_SHOW_DATA)
             ESP_LOGI(SPP_TAG, "ESP_SPP_DATA_IND_EVT len=%d handle=%d",
                     param->data_ind.len, param->data_ind.handle);
             esp_log_buffer_hex("",param->data_ind.data,param->data_ind.len);
             uart_write_bytes(UART_NUM_1, (char *) param->data_ind.data,
                     (size_t) param->data_ind.len);
             _handle = param->data_ind.handle;
-#else
-            gettimeofday(&time_new, NULL);
-            data_num += param->data_ind.len;
-            if (time_new.tv_sec - time_old.tv_sec >= 3) {
-                print_speed();
-            }
-#endif
             break;
         case ESP_SPP_CONG_EVT:
             ESP_LOGI(SPP_TAG, "ESP_SPP_CONG_EVT cong=%d", param->cong.cong);
@@ -198,7 +152,6 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
             break;
         case ESP_SPP_SRV_OPEN_EVT:
             ESP_LOGI(SPP_TAG, "ESP_SPP_SRV_OPEN_EVT");
-            gettimeofday(&time_old, NULL);
             _port_handle = 0;
             for (uint16_t h = 1; h < 30; h++) {
                 uint8_t sig;
